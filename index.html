@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#101827">
+  <title>Phone GPS Monitor</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="">
+</head>
+<body>
+  <main class="container">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ESP8266 • MQTT • GPS</p>
+        <h1>Phone GPS Monitor</h1>
+        <p class="subtitle">Live phone location and microcontroller connection</p>
+      </div>
+      <div class="status-wrap">
+        <span class="dot" id="mqttDot"></span>
+        <span id="mqttStatus">Connecting to broker…</span>
+      </div>
+    </header>
+
+    <section class="actions panel">
+      <div>
+        <h2>GPS tracking</h2>
+        <p id="gpsStatus" class="muted">GPS tracking is stopped.</p>
+      </div>
+      <div class="button-row">
+        <button id="startBtn" class="primary">Start GPS</button>
+        <button id="stopBtn" class="secondary" disabled>Stop GPS</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="metric panel">
+        <span class="metric-label">Latitude</span>
+        <strong id="latitude">—</strong>
+      </article>
+      <article class="metric panel">
+        <span class="metric-label">Longitude</span>
+        <strong id="longitude">—</strong>
+      </article>
+      <article class="metric panel">
+        <span class="metric-label">Accuracy</span>
+        <strong id="accuracy">—</strong>
+      </article>
+      <article class="metric panel">
+        <span class="metric-label">Last GPS update</span>
+        <strong id="lastUpdate">—</strong>
+      </article>
+    </section>
+
+    <section class="panel map-panel">
+      <div class="section-heading">
+        <div>
+          <h2>Phone location</h2>
+          <p class="muted">The marker updates as your phone moves.</p>
+        </div>
+        <a id="openMap" href="#" target="_blank" rel="noopener">Open in Maps ↗</a>
+      </div>
+      <div id="map" role="application" aria-label="Map showing phone GPS position"></div>
+    </section>
+
+    <section class="grid lower-grid">
+      <article class="panel">
+        <h2>ESP8266 status</h2>
+        <div class="status-line"><span>MQTT broker</span><strong id="brokerState">Connecting</strong></div>
+        <div class="status-line"><span>ESP8266</span><strong id="deviceState">Waiting for device</strong></div>
+        <div class="status-line"><span>Last device message</span><strong id="deviceUpdate">—</strong></div>
+      </article>
+      <article class="panel">
+        <h2>Transmission</h2>
+        <div class="status-line"><span>Messages sent</span><strong id="sentCount">0</strong></div>
+        <div class="status-line"><span>Last transmission</span><strong id="sendState">—</strong></div>
+        <p class="small muted">Coordinates are sent whenever the phone reports a new GPS position.</p>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="section-heading">
+        <div>
+          <h2>Recent GPS readings</h2>
+          <p class="muted">Most recent 10 readings received by this webpage.</p>
+        </div>
+        <button id="clearBtn" class="secondary small-button">Clear history</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Latitude</th><th>Longitude</th><th>Accuracy</th></tr></thead>
+          <tbody id="history"><tr><td colspan="4" class="empty">No readings yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <p>Prototype dashboard. Location data is sensitive: use a private test network and do not share your MQTT topic.</p>
+    </footer>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
