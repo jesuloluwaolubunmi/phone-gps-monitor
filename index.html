@@ -53,9 +53,14 @@
         <span class="metric-label">Last GPS update</span>
         <strong id="lastUpdate">—</strong>
       </article>
+      <!-- NEW: live distance to destination -->
+      <article class="metric panel">
+        <span class="metric-label">Distance to destination</span>
+        <strong id="distanceToDest">—</strong>
+      </article>
     </section>
 
-    <!-- NEW: destination / waypoint section -->
+    <!-- destination / waypoint section -->
     <section class="panel waypoint-panel">
       <div class="section-heading">
         <div>
@@ -87,12 +92,17 @@
     </section>
 
     <section class="panel map-panel">
-      <div class="section-heading">
+      <!-- NEW: camera buttons in the map header -->
+      <div class="section-heading map-heading">
         <div>
           <h2>Phone location</h2>
           <p class="muted">Blue marker = phone. Red marker = destination.</p>
         </div>
-        <a id="openMap" href="#" target="_blank" rel="noopener">Open in Maps ↗</a>
+        <div class="map-actions">
+          <button id="centerPhoneBtn" class="secondary small-button">📍 Center on Phone</button>
+          <button id="centerDestBtn"  class="secondary small-button">🎯 Center on Destination</button>
+          <a id="openMap" href="#" target="_blank" rel="noopener">Open in Maps ↗</a>
+        </div>
       </div>
       <div id="map" role="application" aria-label="Map showing phone GPS position"></div>
     </section>
