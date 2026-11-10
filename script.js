@@ -9,7 +9,6 @@ const MQTT_BROKER = "wss://broker.hivemq.com:8884/mqtt";
 const LOCATION_TOPIC =
   "phonegps/esp8266/7f3c91a8d2b64e0f/location";
 
-// NEW: destination topic (must match esp8266_gps.ino)
 const DESTINATION_TOPIC =
   "phonegps/esp8266/7f3c91a8d2b64e0f/destination";
 
@@ -24,10 +23,14 @@ let accuracyCircle = null;
 let map = null;
 let messageCount = 0;
 
-// NEW: destination state
+// destination state
 let destMarker = null;
 let destLat = null;
 let destLon = null;
+
+// NEW: state for camera + route line
+let lastPhonePos = null;
+let routeLine = null;
 
 // Helper function
 function $(id) {
@@ -47,7 +50,6 @@ function initializeMap() {
     attribution: "&copy; OpenStreetMap contributors"
   }).addTo(map);
 
-  // NEW: click on the map to set a destination
   map.on("click", (e) => {
     publishDestination(e.latlng.lat, e.latlng.lng);
   });
@@ -79,11 +81,9 @@ function connectMQTT() {
       $("mqttDot").classList.remove("offline");
     }
 
-    // Subscribe to ESP8266 status and phone GPS
     mqttClient.subscribe(STATUS_TOPIC);
     mqttClient.subscribe(LOCATION_TOPIC);
 
-    // NEW: if a destination was already saved, re-publish it
     const saved = loadSavedDestination();
     if (saved) {
       destLat = saved.latitude;
@@ -92,7 +92,6 @@ function connectMQTT() {
       updateDestinationReadout();
       if ($("destLat")) $("destLat").value = destLat;
       if ($("destLon")) $("destLon").value = destLon;
-      // Re-publish retained so the ESP8266 gets it after reconnect
       publishDestinationMessage(destLat, destLon);
     }
   });
@@ -115,14 +114,10 @@ function connectMQTT() {
     }
   });
 
-  // ========================================
-  // RECEIVE MQTT MESSAGES
-  // ========================================
-
   mqttClient.on("message", (topic, payload) => {
 
     if (topic === LOCATION_TOPIC) {
-      if (watchId !== null) return;   // ignore our own echo
+      if (watchId !== null) return;
 
       try {
         const gps = JSON.parse(payload.toString());
@@ -184,11 +179,10 @@ function connectMQTT() {
 }
 
 // ==========================================
-// NEW: DESTINATION HANDLING
+// DESTINATION HANDLING
 // ==========================================
 
 function publishDestination(lat, lon) {
-  // Validate
   if (!Number.isFinite(lat) || !Number.isFinite(lon) ||
       lat < -90 || lat > 90 || lon < -180 || lon > 180) {
     alert("Invalid coordinates. Latitude must be –90…90 and longitude –180…180.");
@@ -198,18 +192,14 @@ function publishDestination(lat, lon) {
   destLat = lat;
   destLon = lon;
 
-  // Update UI inputs
   if ($("destLat")) $("destLat").value = lat.toFixed(7);
   if ($("destLon")) $("destLon").value = lon.toFixed(7);
 
-  // Draw the marker and update the readout
   drawDestinationMarker(lat, lon);
   updateDestinationReadout();
 
-  // Persist across reloads
   saveDestination(lat, lon);
 
-  // Publish to MQTT
   publishDestinationMessage(lat, lon);
 }
 
@@ -225,7 +215,6 @@ function publishDestinationMessage(lat, lon) {
     timestamp: Date.now()
   });
 
-  // retained: true, so the ESP8266 receives it after it (re)connects
   mqttClient.publish(DESTINATION_TOPIC, payload, { retain: true });
 
   if ($("sendState")) $("sendState").textContent = "Destination published";
@@ -244,9 +233,11 @@ function clearDestination() {
   if ($("destLon")) $("destLon").value = "";
   updateDestinationReadout();
 
+  // NEW: clear line and distance
+  updateRouteLine();
+
   localStorage.removeItem("robotDest");
 
-  // Publish an empty retained message to clear the ESP8266's stored value
   if (mqttClient && mqttClient.connected) {
     mqttClient.publish(DESTINATION_TOPIC, "", { retain: true });
   }
@@ -259,7 +250,6 @@ function drawDestinationMarker(lat, lon) {
 
   if (!destMarker) {
     destMarker = L.marker(pos, {
-      // A red-tinted icon so it is distinct from the phone marker
       icon: L.divIcon({
         className: "dest-icon",
         html: "🎯",
@@ -269,6 +259,9 @@ function drawDestinationMarker(lat, lon) {
   } else {
     destMarker.setLatLng(pos);
   }
+
+  // NEW: refresh the connecting line and distance
+  updateRouteLine();
 }
 
 function updateDestinationReadout() {
@@ -313,7 +306,8 @@ function loadSavedDestination() {
 function updateMap(lat, lon, accuracy) {
   if (!map) return;
 
-  const position = [lat, lon];
+  lastPhonePos = [lat, lon];
+  const position = lastPhonePos;
 
   if (!marker) {
     marker = L.marker(position)
@@ -332,6 +326,87 @@ function updateMap(lat, lon, accuracy) {
     accuracyCircle.setLatLng(position);
     accuracyCircle.setRadius(accuracy);
   }
+
+  // NEW: keep line + distance in sync with the phone position
+  updateRouteLine();
+}
+
+// ==========================================
+// NEW: ROUTE LINE + DISTANCE
+// ==========================================
+
+function haversineMeters(a, b) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const [lat1, lon1] = a;
+  const [lat2, lon2] = b;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const s =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
+function formatDistance(m) {
+  if (!Number.isFinite(m)) return "—";
+  if (m >= 1000) return `${(m / 1000).toFixed(2)} km`;
+  return `${m.toFixed(0)} m`;
+}
+
+function updateRouteLine() {
+  if (!map) return;
+
+  const havePhone = Array.isArray(lastPhonePos);
+  const haveDest  = destLat !== null && destLon !== null;
+
+  if ($("distanceToDest")) {
+    if (havePhone && haveDest) {
+      const d = haversineMeters(lastPhonePos, [destLat, destLon]);
+      $("distanceToDest").textContent = formatDistance(d);
+    } else {
+      $("distanceToDest").textContent = "—";
+    }
+  }
+
+  if (havePhone && haveDest) {
+    const points = [lastPhonePos, [destLat, destLon]];
+    if (!routeLine) {
+      routeLine = L.polyline(points, {
+        color: "#ff7070",
+        weight: 3,
+        opacity: 0.9,
+        dashArray: "8 6"
+      }).addTo(map);
+    } else {
+      routeLine.setLatLngs(points);
+    }
+  } else if (routeLine) {
+    map.removeLayer(routeLine);
+    routeLine = null;
+  }
+}
+
+// ==========================================
+// NEW: CAMERA CONTROLS
+// ==========================================
+
+function centerOnPhone() {
+  if (!map) return;
+  if (!Array.isArray(lastPhonePos)) {
+    alert("No phone position yet. Press Start GPS first.");
+    return;
+  }
+  map.flyTo(lastPhonePos, Math.max(map.getZoom(), 16), { duration: 0.8 });
+}
+
+function centerOnDestination() {
+  if (!map) return;
+  if (destLat === null || destLon === null) {
+    alert("No destination set. Type coordinates or click the map first.");
+    return;
+  }
+  map.flyTo([destLat, destLon], Math.max(map.getZoom(), 16), { duration: 0.8 });
 }
 
 // ==========================================
@@ -342,7 +417,6 @@ function addHistory(lat, lon, accuracy, time) {
   const history = $("history");
   if (!history) return;
 
-  // Remove the "no readings" placeholder on first insert
   const empty = history.querySelector(".empty");
   if (empty) history.removeChild(empty.parentElement);
 
@@ -457,7 +531,7 @@ function stopGPS() {
 }
 
 // ==========================================
-// NEW: MANUAL DESTINATION ENTRY
+// MANUAL DESTINATION ENTRY
 // ==========================================
 
 function submitTypedDestination() {
@@ -474,15 +548,16 @@ document.addEventListener("DOMContentLoaded", () => {
   initializeMap();
   connectMQTT();
 
-  // FIXED: use the actual button IDs from index.html
   if ($("startBtn")) $("startBtn").addEventListener("click", startGPS);
   if ($("stopBtn"))  $("stopBtn").addEventListener("click", stopGPS);
 
-  // destination controls
   if ($("setDestBtn"))   $("setDestBtn").addEventListener("click", submitTypedDestination);
   if ($("clearDestBtn")) $("clearDestBtn").addEventListener("click", clearDestination);
 
-  // Enter key in the inputs triggers Set Destination
+  // NEW: camera controls
+  if ($("centerPhoneBtn")) $("centerPhoneBtn").addEventListener("click", centerOnPhone);
+  if ($("centerDestBtn"))  $("centerDestBtn").addEventListener("click", centerOnDestination);
+
   ["destLat", "destLon"].forEach(id => {
     const el = $(id);
     if (el) {
