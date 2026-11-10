@@ -77,7 +77,7 @@ footer { color: var(--muted); font-size: .78rem; line-height: 1.5; padding: 8px 
   .button-row { width: 100%; }
   .button-row button { flex: 1; }
 }
-/* NEW: destination / waypoint section */
+/* destination / waypoint section */
 .waypoint-panel { margin-top: 16px; }
 .waypoint-form {
   display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
@@ -99,3 +99,18 @@ footer { color: var(--muted); font-size: .78rem; line-height: 1.5; padding: 8px 
   display: block; font-size: .95rem; text-align: right;
 }
 .dest-icon { font-size: 22px; line-height: 22px; text-align: center; }
+
+/* NEW: map header actions row */
+.map-heading { flex-wrap: wrap; gap: 12px; }
+.map-actions {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+}
+.map-actions a { margin-left: 4px; }
+
+/* NEW: five-column metric grid on wide screens */
+@media (min-width: 900px) {
+  .grid { grid-template-columns: repeat(5, 1fr); }
+}
+
+/* NEW: prominent distance readout */
+#distanceToDest { color: var(--accent); }
