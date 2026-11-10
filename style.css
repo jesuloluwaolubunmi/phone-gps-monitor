@@ -77,3 +77,25 @@ footer { color: var(--muted); font-size: .78rem; line-height: 1.5; padding: 8px 
   .button-row { width: 100%; }
   .button-row button { flex: 1; }
 }
+/* NEW: destination / waypoint section */
+.waypoint-panel { margin-top: 16px; }
+.waypoint-form {
+  display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+}
+.waypoint-form label {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: .82rem; color: var(--muted);
+}
+.waypoint-form input {
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; font-size: .95rem; min-width: 180px;
+}
+.waypoint-form input:focus {
+  outline: 2px solid var(--accent); outline-offset: 0;
+  border-color: var(--accent);
+}
+.waypoint-state strong {
+  display: block; font-size: .95rem; text-align: right;
+}
+.dest-icon { font-size: 22px; line-height: 22px; text-align: center; }
