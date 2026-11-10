@@ -437,6 +437,8 @@ function startGPS() {
     handleGPSError,
     { enableHighAccuracy: true, timeout: 20000, maximumAge: 2000 }
   );
+  if ($("startBtn")) $("startBtn").disabled = true;
+  if ($("stopBtn"))  $("stopBtn").disabled  = false;
 }
 
 // ==========================================
@@ -450,6 +452,8 @@ function stopGPS() {
   }
   if ($("gpsStatus")) $("gpsStatus").textContent = "GPS tracking stopped";
   if ($("sendState")) $("sendState").textContent = "GPS transmission stopped";
+  if ($("startBtn")) $("startBtn").disabled = false;
+  if ($("stopBtn"))  $("stopBtn").disabled  = true;
 }
 
 // ==========================================
@@ -470,14 +474,15 @@ document.addEventListener("DOMContentLoaded", () => {
   initializeMap();
   connectMQTT();
 
-  if ($("startGPS")) $("startGPS").addEventListener("click", startGPS);
-  if ($("stopGPS"))  $("stopGPS").addEventListener("click", stopGPS);
+  // FIXED: use the actual button IDs from index.html
+  if ($("startBtn")) $("startBtn").addEventListener("click", startGPS);
+  if ($("stopBtn"))  $("stopBtn").addEventListener("click", stopGPS);
 
-  // NEW: destination controls
+  // destination controls
   if ($("setDestBtn"))   $("setDestBtn").addEventListener("click", submitTypedDestination);
   if ($("clearDestBtn")) $("clearDestBtn").addEventListener("click", clearDestination);
 
-  // NEW: allow Enter key in the inputs to trigger Set Destination
+  // Enter key in the inputs triggers Set Destination
   ["destLat", "destLon"].forEach(id => {
     const el = $(id);
     if (el) {
