@@ -80,24 +80,6 @@
       </div>
     </section>
 
-
-    <!-- WATER QUALITY -->
-    <section class="panel">
-      <h2>💧 Water Quality <span class="pill" id="wqBand" style="background:#6b7280;color:#fff">WAITING</span></h2>
-      <p class="muted">Live from pH / turbidity / TDS sensors on the Arduino Uno. New reading every 5 seconds. Coloured dots on the map show where each reading was taken.</p>
-      <div class="grid" style="margin-top:10px">
-        <article class="metric panel"><span class="metric-label">pH</span><strong id="wqPH">—</strong><span class="muted">Good: 6.5 – 8.5</span></article>
-        <article class="metric panel"><span class="metric-label">Turbidity</span><strong id="wqTurb">—</strong><span class="muted">Clear: &lt; 50 NTU</span></article>
-        <article class="metric panel"><span class="metric-label">Total Dissolved Solids</span><strong id="wqTDS">—</strong><span class="muted">Fresh: &lt; 500 ppm</span></article>
-        <article class="metric panel"><span class="metric-label">Last water reading</span><strong id="wqTime">—</strong></article>
-      </div>
-      <p class="muted" style="margin-top:8px">⚠️ Guide bands only — pH especially needs calibration with buffer solutions (see Arduino code) before you trust the numbers. Keep probes submerged and clean between tests.</p>
-      <div class="section-heading" style="margin-top:14px"><div><h3>Water quality history</h3><p class="muted">Most recent 20 readings, with robot position at time of reading.</p></div>
-      <button id="clearWQBtn" class="secondary small-button">Clear history</button></div>
-      <div class="table-wrap"><table><thead><tr><th>Time</th><th>pH</th><th>Turbidity (NTU)</th><th>TDS (ppm)</th><th>Robot position</th><th>Quality</th></tr></thead>
-      <tbody id="wqHistory"><tr><td colspan="6" class="empty">No readings yet.</td></tr></tbody></table></div>
-    </section>
-
     <section class="grid">
       <article class="metric panel"><span class="metric-label">Latitude</span><strong id="latitude">—</strong></article>
       <article class="metric panel"><span class="metric-label">Longitude</span><strong id="longitude">—</strong></article>
@@ -105,6 +87,7 @@
       <article class="metric panel"><span class="metric-label">Last GPS update</span><strong id="lastUpdate">—</strong></article>
       <article class="metric panel"><span class="metric-label">Distance to destination</span><strong id="distanceToDest2">—</strong></article>
     </section>
+    
 
     <section class="panel waypoint-panel">
       <div class="section-heading">
@@ -132,6 +115,24 @@
       </div>
       <div id="map" role="application" aria-label="Map showing phone GPS position" style="height:380px"></div>
     </section>
+
+    <!-- WATER QUALITY -->
+    <section class="panel">
+      <h2>💧 Water Quality <span class="pill" id="wqBand" style="background:#6b7280;color:#fff">WAITING</span></h2>
+      <p class="muted">Live from pH / turbidity / TDS sensors on the Arduino Uno. New reading every 5 seconds. Coloured dots on the map show where each reading was taken.</p>
+      <div class="grid" style="margin-top:10px">
+        <article class="metric panel"><span class="metric-label">pH</span><strong id="wqPH">—</strong><span class="muted">Good: 6.5 – 8.5</span></article>
+        <article class="metric panel"><span class="metric-label">Turbidity</span><strong id="wqTurb">—</strong><span class="muted">Clear: &lt; 50 NTU</span></article>
+        <article class="metric panel"><span class="metric-label">Total Dissolved Solids</span><strong id="wqTDS">—</strong><span class="muted">Fresh: &lt; 500 ppm</span></article>
+        <article class="metric panel"><span class="metric-label">Last water reading</span><strong id="wqTime">—</strong></article>
+      </div>
+      <p class="muted" style="margin-top:8px">⚠️ Guide bands only — pH especially needs calibration with buffer solutions (see Arduino code) before you trust the numbers. Keep probes submerged and clean between tests.</p>
+      <div class="section-heading" style="margin-top:14px"><div><h3>Water quality history</h3><p class="muted">Most recent 20 readings, with robot position at time of reading.</p></div>
+      <button id="clearWQBtn" class="secondary small-button">Clear history</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Time</th><th>pH</th><th>Turbidity (NTU)</th><th>TDS (ppm)</th><th>Robot position</th><th>Quality</th></tr></thead>
+      <tbody id="wqHistory"><tr><td colspan="6" class="empty">No readings yet.</td></tr></tbody></table></div>
+    </section>
+
 
     <section class="grid lower-grid">
       <article class="panel"><h2>ESP8266 status</h2>
