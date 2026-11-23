@@ -1,1152 +1,261 @@
-// ==========================================
-// PHONE GPS MONITOR - NONMARIS
-// ==========================================
+/* NONMARIS - Phone GPS Monitor + Miniature Compass (Option A: magnetometer)
+   Flow: Phone magnetometer heading + GPS -> bearing/turn computed HERE
+         -> MQTT NAV topic -> ESP8266 -> Serial NAV,... -> Arduino Uno
+   Arduino still keeps its own GPS/DEST calculation as a backup check.
+*/
+const $ = (id) => document.getElementById(id);
+const DEVICE_ID = "7f3c91a8d2b64e0f";
+const BASE = `phonegps/esp8266/${DEVICE_ID}`;
+const LOCATION_TOPIC = `${BASE}/location`;
+const DESTINATION_TOPIC = `${BASE}/destination`;
+const STATUS_TOPIC = `${BASE}/status`;
+const NAV_TOPIC = `${BASE}/nav`; // NEW: compass turn instruction
 
-// MQTT broker
-const MQTT_BROKER = "wss://broker.hivemq.com:8884/mqtt";
-
-// MQTT topics
-const LOCATION_TOPIC =
-  "phonegps/esp8266/7f3c91a8d2b64e0f/location";
-
-const DESTINATION_TOPIC =
-  "phonegps/esp8266/7f3c91a8d2b64e0f/destination";
-
-const STATUS_TOPIC =
-  "phonegps/esp8266/7f3c91a8d2b64e0f/status";
-
-// GPS variables
-let watchId = null;
-let mqttClient = null;
-let marker = null;
-let accuracyCircle = null;
-let map = null;
-let messageCount = 0;
-
-// Destination state
-let destMarker = null;
-let destLat = null;
-let destLon = null;
-
-// Route state
-let lastPhonePos = null;
-let routeLine = null;
-
-// Phone compass state
-let compassHeading = null;
-let compassIsAbsolute = false;
+let mqttClient = null, watchId = null, map = null, phoneMarker = null, destMarker = null, accuracyCircle = null;
+let currentLat = null, currentLon = null, currentAccuracy = null;
+let destLat = null, destLon = null;
+let compassHeading = null; // magnetometer, 0-360, 0=N
+let compassSource = "—"; // "Magnetometer" | "GPS heading (fallback)"
+let gpsHeading = null;
+let lastNavSentAt = 0, sentCount = 0;
 let compassListening = false;
-let lastGpsData = null;
-let lastLocationPublishAt = 0;
 
-// Helper function
-function $(id) {
-  return document.getElementById(id);
+// ---------- helpers ----------
+const toRad = (d) => d * Math.PI / 180;
+const toDeg = (r) => r * 180 / Math.PI;
+const norm180 = (a) => { while (a > 180) a -= 360; while (a < -180) a += 360; return a; };
+const norm360 = (a) => ((a % 360) + 360) % 360;
+function bearingTo(lat1, lon1, lat2, lon2) {
+  const dLon = toRad(lon2 - lon1);
+  const y = Math.sin(dLon) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) - Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLon);
+  return norm360(toDeg(Math.atan2(y, x)));
+}
+function haversineM(lat1, lon1, lat2, lon2) {
+  const R = 6371000, dLat = toRad(lat2-lat1), dLon = toRad(lon2-lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+function cardinal(angle) {
+  const dirs = ["North","Northeast","East","Southeast","South","Southwest","West","Northwest"];
+  return dirs[Math.round(norm360(angle)/45) % 8];
+}
+// Smooth heading so needle doesn't jitter: shortest-arc lerp
+function smoothHeading(prev, next, alpha=0.25) {
+  if (prev === null) return next;
+  const diff = norm180(next - prev);
+  return norm360(prev + diff * alpha);
 }
 
-// ==========================================
-// COMPASS DISPLAY + PHONE SENSOR
-// ==========================================
-
-function createCompassPanel() {
-  if ($("compassPanel")) return;
-
-  const panel = document.createElement("section");
-  panel.id = "compassPanel";
-
-  panel.style.cssText = [
-    "margin:16px 0",
-    "padding:16px",
-    "border:1px solid #d7dee8",
-    "border-radius:12px",
-    "background:#ffffff",
-    "color:#172033",
-    "font-family:Arial,sans-serif",
-    "box-shadow:0 2px 8px rgba(0,0,0,.06)"
-  ].join(";");
-
-  const title = document.createElement("h3");
-  title.textContent = "NonMaris Phone Compass";
-  title.style.cssText = "margin:0 0 10px;font-size:18px";
-
-  const value = document.createElement("div");
-  value.id = "compassHeading";
-  value.textContent = "Waiting for compass…";
-  value.style.cssText =
-    "font-size:28px;font-weight:700;margin:8px 0";
-
-  const direction = document.createElement("div");
-  direction.id = "compassDirection";
-  direction.textContent = "Direction: —";
-  direction.style.cssText = "font-size:15px;margin:5px 0";
-
-  const status = document.createElement("div");
-  status.id = "compassStatus";
-  status.textContent = "Tap Start Compass on the phone.";
-  status.style.cssText =
-    "font-size:13px;color:#526174;margin:8px 0";
-
-  const button = document.createElement("button");
-  button.id = "startCompassBtn";
-  button.type = "button";
-  button.textContent = "Start Compass";
-
-  button.style.cssText =
-    "padding:10px 16px;border:0;border-radius:8px;" +
-    "background:#1769aa;color:white;font-weight:600;cursor:pointer";
-
-  panel.append(title, value, direction, status, button);
-
-  const mapElement = $("map");
-
-  if (mapElement && mapElement.parentNode) {
-    mapElement.insertAdjacentElement("beforebegin", panel);
-  } else {
-    document.body.insertBefore(panel, document.body.firstChild);
-  }
-
-  button.addEventListener("click", startCompass);
-}
-
-function directionFromHeading(heading) {
-  const directions = [
-    "North",
-    "Northeast",
-    "East",
-    "Southeast",
-    "South",
-    "Southwest",
-    "West",
-    "Northwest"
-  ];
-
-  return directions[Math.round(heading / 45) % 8];
-}
-
-function updateCompassDisplay(heading, isAbsolute) {
-  if (!Number.isFinite(heading)) return;
-
-  const normalized = ((heading % 360) + 360) % 360;
-
-  if ($("compassHeading")) {
-    $("compassHeading").textContent =
-      `${normalized.toFixed(1)}°`;
-  }
-
-  if ($("compassDirection")) {
-    $("compassDirection").textContent =
-      `Direction: ${directionFromHeading(normalized)}`;
-  }
-
-  if ($("compassStatus")) {
-    $("compassStatus").textContent = isAbsolute
-      ? "Absolute heading received. Keep the phone level and check calibration."
-      : "Relative orientation only — not safe to use as a compass heading.";
-  }
-}
-
-function handleCompassOrientation(event, isAbsoluteEvent = false) {
-  let heading = null;
-  let absolute = false;
-
-  if (Number.isFinite(event.webkitCompassHeading)) {
-    heading = event.webkitCompassHeading;
-    absolute = true;
-
-  } else if (
-    Number.isFinite(event.alpha) &&
-    (event.absolute === true || isAbsoluteEvent)
-  ) {
-    heading = (360 - event.alpha) % 360;
-    absolute = true;
-  }
-
-  if (!absolute || !Number.isFinite(heading)) {
-    if ($("compassStatus")) {
-      $("compassStatus").textContent =
-        "No absolute compass reading available from this browser/device.";
-    }
-    return;
-  }
-
-  compassHeading = ((heading % 360) + 360) % 360;
-  compassIsAbsolute = true;
-
-  updateCompassDisplay(compassHeading, true);
-
-  if (lastGpsData) {
-    lastGpsData.heading = compassHeading;
-    lastGpsData.headingAbsolute = true;
-    publishLocationData(false);
-  }
-}
-
-async function startCompass() {
-  if (compassListening) return;
-
-  if (!window.isSecureContext) {
-    if ($("compassStatus")) {
-      $("compassStatus").textContent =
-        "Compass access requires an HTTPS website.";
-    }
-    return;
-  }
-
-  try {
-    if (
-      typeof DeviceOrientationEvent !== "undefined" &&
-      typeof DeviceOrientationEvent.requestPermission === "function"
-    ) {
-      const permission =
-        await DeviceOrientationEvent.requestPermission();
-
-      if (permission !== "granted") {
-        if ($("compassStatus")) {
-          $("compassStatus").textContent =
-            "Permission to access orientation was not granted.";
-        }
-        return;
-      }
-    }
-
-    if (typeof DeviceOrientationEvent === "undefined") {
-      if ($("compassStatus")) {
-        $("compassStatus").textContent =
-          "This browser does not support device orientation.";
-      }
-      return;
-    }
-
-    window.addEventListener(
-      "deviceorientationabsolute",
-      (event) => handleCompassOrientation(event, true),
-      true
-    );
-
-    window.addEventListener(
-      "deviceorientation",
-      (event) => {
-        if (
-          event.absolute === true ||
-          Number.isFinite(event.webkitCompassHeading)
-        ) {
-          handleCompassOrientation(event, false);
-        }
-      },
-      true
-    );
-
-    compassListening = true;
-
-    if ($("compassStatus")) {
-      $("compassStatus").textContent =
-        "Listening for an absolute compass heading…";
-    }
-
-    if ($("startCompassBtn")) {
-      $("startCompassBtn").textContent = "Compass Started";
-      $("startCompassBtn").disabled = true;
-    }
-
-  } catch (error) {
-    console.error("Compass permission/start error:", error);
-
-    if ($("compassStatus")) {
-      $("compassStatus").textContent =
-        "Could not start compass: " + error.message;
-    }
-  }
-}
-
-function publishLocationData(force = false) {
-  if (!lastGpsData || !mqttClient || !mqttClient.connected) {
-    return;
-  }
-
-  const now = Date.now();
-
-  if (!force && now - lastLocationPublishAt < 500) {
-    return;
-  }
-
-  lastLocationPublishAt = now;
-  lastGpsData.timestamp = now;
-
-  mqttClient.publish(
-    LOCATION_TOPIC,
-    JSON.stringify(lastGpsData)
-  );
-
-  if ($("sendState")) {
-    $("sendState").textContent = "GPS and compass data sent";
-  }
-
-  messageCount++;
-
-  if ($("messageCount")) {
-    $("messageCount").textContent = messageCount;
-  }
-}
-
-// ==========================================
-// INITIALIZE MAP
-// ==========================================
-
-function initializeMap() {
-  if (!$("map")) return;
-
-  map = L.map("map").setView([6.5244, 3.3792], 13);
-
-  L.tileLayer(
-    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    {
-      attribution: "&copy; OpenStreetMap contributors"
-    }
-  ).addTo(map);
-
-  map.on("click", (e) => {
-    publishDestination(e.latlng.lat, e.latlng.lng);
-  });
-}
-
-// ==========================================
-// CONNECT TO MQTT
-// ==========================================
-
+// ---------- MQTT ----------
 function connectMQTT() {
-  if (typeof mqtt === "undefined") {
-    console.error("MQTT library not loaded.");
-    return;
-  }
-
-  mqttClient = mqtt.connect(MQTT_BROKER);
-
+  // Public test broker over secure websocket (same as before)
+  mqttClient = mqtt.connect("wss://broker.hivemq.com:8884/mqtt", { clientId: "web-" + Math.random().toString(16).slice(2,10), clean: true });
   mqttClient.on("connect", () => {
-    console.log("Connected to MQTT broker.");
-
-    if ($("sendState")) {
-      $("sendState").textContent = "MQTT Connected";
-    }
-
-    if ($("mqttStatus")) {
-      $("mqttStatus").textContent = "Connected";
-    }
-
-    if ($("mqttDot")) {
-      $("mqttDot").classList.add("online");
-      $("mqttDot").classList.remove("offline");
-    }
-
-    // Subscribe to all three topics.
-    mqttClient.subscribe(STATUS_TOPIC);
-    mqttClient.subscribe(LOCATION_TOPIC);
-    mqttClient.subscribe(DESTINATION_TOPIC);
-
-    // Restore this browser's locally saved destination for display.
-    // IMPORTANT: Do not publish it here.
-    // The phone's retained MQTT destination should remain authoritative.
-    const saved = loadSavedDestination();
-
-    if (saved) {
-      destLat = saved.latitude;
-      destLon = saved.longitude;
-
-      drawDestinationMarker(destLat, destLon);
-      updateDestinationReadout();
-
-      if ($("destLat")) {
-        $("destLat").value = destLat;
-      }
-
-      if ($("destLon")) {
-        $("destLon").value = destLon;
-      }
-    }
+    if ($("mqttStatus")) $("mqttStatus").textContent = "Connected";
+    if ($("brokerState")) $("brokerState").textContent = "Connected";
+    mqttClient.subscribe([LOCATION_TOPIC, DESTINATION_TOPIC, STATUS_TOPIC]);
+    const saved = loadDestination(); if (saved) publishDestinationMessage(saved.lat, saved.lon, false);
   });
-
-  mqttClient.on("error", (error) => {
-    console.error("MQTT error:", error);
-
-    if ($("sendState")) {
-      $("sendState").textContent = "MQTT connection error";
-    }
-  });
-
-  mqttClient.on("offline", () => {
-    if ($("sendState")) {
-      $("sendState").textContent = "MQTT Offline";
-    }
-
-    if ($("mqttStatus")) {
-      $("mqttStatus").textContent = "Offline";
-    }
-
-    if ($("mqttDot")) {
-      $("mqttDot").classList.remove("online");
-      $("mqttDot").classList.add("offline");
-    }
-  });
-
   mqttClient.on("message", (topic, payload) => {
-
-    // ======================================
-    // RECEIVE DESTINATION FROM PHONE
-    // ======================================
-
-    if (topic === DESTINATION_TOPIC) {
-      const message = payload.toString();
-
-      // Empty retained message means destination was cleared.
-      if (message.trim() === "") {
-        clearDestinationFromRemote();
-        return;
-      }
-
-      try {
-        const destination = JSON.parse(message);
-
-        const lat = Number(destination.latitude);
-        const lon = Number(destination.longitude);
-
-        if (
-          !Number.isFinite(lat) ||
-          !Number.isFinite(lon) ||
-          lat < -90 ||
-          lat > 90 ||
-          lon < -180 ||
-          lon > 180
-        ) {
-          console.warn(
-            "Invalid destination received:",
-            destination
-          );
-          return;
-        }
-
-        destLat = lat;
-        destLon = lon;
-
-        if ($("destLat")) {
-          $("destLat").value = lat.toFixed(7);
-        }
-
-        if ($("destLon")) {
-          $("destLon").value = lon.toFixed(7);
-        }
-
-        drawDestinationMarker(lat, lon);
-        updateDestinationReadout();
-        saveDestination(lat, lon);
-
-        console.log("Destination received:", lat, lon);
-
-        if ($("sendState")) {
-          $("sendState").textContent =
-            "Destination received through MQTT";
-        }
-
-      } catch (error) {
-        console.error("Destination message error:", error);
-      }
-
-      return;
-    }
-
-    // ======================================
-    // RECEIVE GPS LOCATION FROM PHONE
-    // ======================================
-
-    if (topic === LOCATION_TOPIC) {
-
-      // The phone already displays its own GPS readings.
-      // The laptop receives them through MQTT.
-      if (watchId !== null) return;
-
-      try {
-        const gps = JSON.parse(payload.toString());
-
-        const lat = Number(gps.latitude);
-        const lon = Number(gps.longitude);
-        const accuracy = Number(gps.accuracy);
-
-        if (
-          !Number.isFinite(lat) ||
-          !Number.isFinite(lon) ||
-          !Number.isFinite(accuracy) ||
-          lat < -90 ||
-          lat > 90 ||
-          lon < -180 ||
-          lon > 180
-        ) {
-          console.warn("Invalid GPS coordinates:", gps);
-          return;
-        }
-
-        const timestamp = gps.timestamp
-          ? new Date(gps.timestamp)
-          : new Date();
-
-        const timeText = timestamp.toLocaleTimeString();
-
-        if (
-          Number.isFinite(Number(gps.heading)) &&
-          gps.headingAbsolute === true
-        ) {
-          updateCompassDisplay(Number(gps.heading), true);
-        }
-
-        if ($("latitude")) {
-          $("latitude").textContent = lat.toFixed(7);
-        }
-
-        if ($("longitude")) {
-          $("longitude").textContent = lon.toFixed(7);
-        }
-
-        if ($("accuracy")) {
-          $("accuracy").textContent =
-            `±${accuracy.toFixed(1)} m`;
-        }
-
-        if ($("lastUpdate")) {
-          $("lastUpdate").textContent = timeText;
-        }
-
-        if ($("gpsStatus")) {
-          $("gpsStatus").textContent =
-            "Receiving GPS from phone";
-        }
-
-        updateMap(lat, lon, accuracy);
-
-        if ($("openMap")) {
-          $("openMap").href =
-            `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}`;
-        }
-
-        addHistory(lat, lon, accuracy, timeText);
-
-        if ($("sendState")) {
-          $("sendState").textContent =
-            "GPS received from phone";
-        }
-
-      } catch (error) {
-        console.error("Error processing GPS message:", error);
-      }
-
-      return;
-    }
-
-    // ======================================
-    // RECEIVE ESP8266 STATUS
-    // ======================================
-
     if (topic === STATUS_TOPIC) {
-      try {
-        const status = JSON.parse(payload.toString());
-
-        if ($("deviceState")) {
-          $("deviceState").textContent =
-            status.online ? "Online" : "Offline";
-        }
-
-        if ($("deviceUpdate")) {
-          $("deviceUpdate").textContent =
-            new Date().toLocaleTimeString();
-        }
-
-      } catch (error) {
-        console.error("Status message error:", error);
-      }
+      try { const s = JSON.parse(payload.toString());
+        if ($("deviceState")) $("deviceState").textContent = s.online ? "Online" : "Offline";
+        if ($("deviceUpdate")) $("deviceUpdate").textContent = new Date().toLocaleTimeString();
+      } catch(e) {}
+    }
+    if (topic === LOCATION_TOPIC && watchId === null) {
+      try { const gps = JSON.parse(payload.toString());
+        if (Number.isFinite(Number(gps.latitude))) updatePosition(Number(gps.latitude), Number(gps.longitude), Number(gps.accuracy));
+      } catch(e) {}
+    }
+    if (topic === DESTINATION_TOPIC) {
+      try { const d = JSON.parse(payload.toString());
+        if (Number.isFinite(Number(d.latitude))) { destLat = Number(d.latitude); destLon = Number(d.longitude); drawDestinationMarker(destLat, destLon); updateDestinationReadout(); updateCompass(); }
+      } catch(e) {}
     }
   });
 }
 
-// ==========================================
-// DESTINATION HANDLING
-// ==========================================
+// ---------- Compass: Option A magnetometer ----------
+async function enableCompass() {
+  try {
+    // iOS 13+ needs explicit permission
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+      const res = await DeviceOrientationEvent.requestPermission();
+      if (res !== "granted") { if ($("compassStatus")) $("compassStatus").textContent = "Compass: permission denied. Using GPS heading fallback."; return; }
+    }
+    if (compassListening) return;
+    compassListening = true;
+    window.addEventListener("deviceorientationabsolute", onOrientation, true);
+    window.addEventListener("deviceorientation", onOrientation, true);
+    if ($("compassStatus")) $("compassStatus").textContent = "Compass: listening (magnetometer). Hold phone flat, top edge = facing direction.";
+    if ($("compassBtn")) $("compassBtn").textContent = "Compass On ✓";
+  } catch(e) { console.error(e); }
+}
+function onOrientation(e) {
+  let heading = null;
+  if (typeof e.webkitCompassHeading === "number" && Number.isFinite(e.webkitCompassHeading)) {
+    heading = e.webkitCompassHeading; // iOS Safari: already 0=N, clockwise
+  } else if (typeof e.alpha === "number" && e.absolute) {
+    heading = norm360(360 - e.alpha); // Android absolute: alpha is CCW from north
+  } else if (typeof e.alpha === "number") {
+    heading = norm360(360 - e.alpha); // non-absolute fallback, still usable if calibrated
+  }
+  if (heading === null || !Number.isFinite(heading)) return;
+  compassHeading = smoothHeading(compassHeading, heading);
+  compassSource = "Magnetometer";
+  updateCompass();
+}
+function effectiveHeading() {
+  if (compassHeading !== null) return { heading: compassHeading, source: "Magnetometer" };
+  if (gpsHeading !== null) return { heading: gpsHeading, source: "GPS heading (fallback)" };
+  return { heading: null, source: "—" };
+}
 
+// ---------- Compass UI + NAV calculation + publish ----------
+function updateCompass() {
+  const h = effectiveHeading();
+  const headingEl = $("headingReadout"), bearingEl = $("bearingReadout"), turnEl = $("turnReadout");
+  if (headingEl) headingEl.textContent = h.heading === null ? "—" : `${h.heading.toFixed(1)}°`;
+  if ($("headingDir")) $("headingDir").textContent = h.heading === null ? "" : cardinal(h.heading);
+  if ($("turnSource")) $("turnSource").textContent = `Source: ${h.source}`;
+  if ($("compassStatus") && h.heading !== null) $("compassStatus").textContent = `Compass: ${h.source} — ${h.heading.toFixed(1)}°`;
+
+  // Rotate blue needle: needle points up at 0, so rotate by heading
+  const needle = $("headingNeedle");
+  if (needle && h.heading !== null) needle.style.transform = `rotate(${h.heading}deg)`;
+
+  if (currentLat === null || destLat === null || h.heading === null) {
+    if (bearingEl) bearingEl.textContent = "—";
+    if (turnEl) turnEl.textContent = "—";
+    if ($("turnDirection")) $("turnDirection").textContent = "WAITING";
+    return;
+  }
+  const bearing = bearingTo(currentLat, currentLon, destLat, destLon);
+  const dist = haversineM(currentLat, currentLon, destLat, destLon);
+  const turn = norm180(bearing - h.heading); // + = RIGHT, - = LEFT
+  const aligned = Math.abs(turn) <= 5;
+  if (bearingEl) bearingEl.textContent = `${bearing.toFixed(1)}°`;
+  if ($("bearingDir")) $("bearingDir").textContent = cardinal(bearing);
+  if (turnEl) turnEl.textContent = aligned ? "0° — ALIGNED" : `${turn > 0 ? "+" : ""}${turn.toFixed(1)}°`;
+  if ($("turnDirection")) $("turnDirection").textContent = aligned ? "ALIGNED ✓" : (turn > 0 ? "TURN RIGHT →" : "← TURN LEFT");
+  // Red destination needle: relative to heading
+  const destNeedle = $("destNeedle");
+  if (destNeedle) destNeedle.style.transform = `rotate(${norm360(bearing - h.heading)}deg)`;
+  const dText = dist < 1000 ? `${dist.toFixed(1)} m` : `${(dist/1000).toFixed(2)} km`;
+  if ($("distanceToDest")) $("distanceToDest").textContent = dText;
+  if ($("distanceToDest2")) $("distanceToDest2").textContent = dText;
+
+  publishNav(bearing, h.heading, turn, dist, aligned, h.source);
+}
+function publishNav(bearing, heading, turn, distance, aligned, source) {
+  if (!mqttClient || !mqttClient.connected) return;
+  const now = Date.now();
+  // Throttle: at most every 500ms, OR immediately if turn changed by >=2° / alignment flipped
+  if (now - lastNavSentAt < 500 && Math.abs(turn - (publishNav._lastTurn ?? 999)) < 2) return;
+  publishNav._lastTurn = turn; lastNavSentAt = now;
+  const payload = JSON.stringify({ bearing: +bearing.toFixed(2), heading: +heading.toFixed(2), turn: +turn.toFixed(2), distance: +distance.toFixed(1), aligned, headingSource: source, timestamp: new Date().toISOString() });
+  mqttClient.publish(NAV_TOPIC, payload, { retain: false });
+  sentCount++; if ($("sentCount")) $("sentCount").textContent = String(sentCount);
+  if ($("sendState")) $("sendState").textContent = `NAV sent: TURN ${turn > 0 ? "+" : ""}${turn.toFixed(1)}°`;
+  if ($("navLastSent")) $("navLastSent").textContent = `${new Date().toLocaleTimeString()} — TURN ${turn > 0 ? "+" : ""}${turn.toFixed(1)}° (bearing ${bearing.toFixed(1)}°, heading ${heading.toFixed(1)}°)`;
+}
+
+// ---------- GPS ----------
+function handlePosition(pos) {
+  const lat = pos.coords.latitude, lon = pos.coords.longitude, acc = pos.coords.accuracy;
+  if (Number.isFinite(pos.coords.heading) && pos.coords.heading >= 0) gpsHeading = pos.coords.heading;
+  updatePosition(lat, lon, acc);
+  if (mqttClient && mqttClient.connected) publishLocationData();
+}
+function updatePosition(lat, lon, acc) {
+  currentLat = lat; currentLon = lon; currentAccuracy = acc;
+  if ($("latitude")) $("latitude").textContent = lat.toFixed(7);
+  if ($("longitude")) $("longitude").textContent = lon.toFixed(7);
+  if ($("accuracy")) $("accuracy").textContent = `±${Number(acc).toFixed(1)} m`;
+  if ($("lastUpdate")) $("lastUpdate").textContent = new Date().toLocaleTimeString();
+  if ($("gpsStatus")) $("gpsStatus").textContent = "Receiving GPS from phone";
+  updateMap(lat, lon, acc); addHistory(lat, lon, acc, new Date().toLocaleTimeString()); updateCompass();
+}
+function publishLocationData() {
+  const h = effectiveHeading();
+  const payload = JSON.stringify({ latitude: currentLat, longitude: currentLon, accuracy: currentAccuracy, heading: h.heading ?? 0, headingAbsolute: h.heading !== null, headingSource: h.source, timestamp: new Date().toISOString() });
+  mqttClient.publish(LOCATION_TOPIC, payload); sentCount++; if ($("sentCount")) $("sentCount").textContent = String(sentCount);
+}
+function handleGPSError(e) {
+  const msgs = { 1: "Location permission denied. Allow location access.", 2: "GPS location unavailable.", 3: "GPS request timed out. Try again." };
+  if ($("gpsStatus")) $("gpsStatus").textContent = msgs[e.code] || "Unable to obtain GPS location.";
+}
+function startGPS() {
+  if (!navigator.geolocation) return alert("Your browser does not support GPS location.");
+  if (watchId !== null) return;
+  if ($("gpsStatus")) $("gpsStatus").textContent = "Searching for GPS location...";
+  watchId = navigator.geolocation.watchPosition(handlePosition, handleGPSError, { enableHighAccuracy: true, timeout: 20000, maximumAge: 2000 });
+  if ($("startBtn")) $("startBtn").disabled = true; if ($("stopBtn")) $("stopBtn").disabled = false;
+  enableCompass(); // start compass together with GPS
+}
+function stopGPS() {
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if ($("gpsStatus")) $("gpsStatus").textContent = "GPS tracking is stopped.";
+  if ($("startBtn")) $("startBtn").disabled = false; if ($("stopBtn")) $("stopBtn").disabled = true;
+}
+
+// ---------- Destination ----------
+function saveDestination(lat, lon) { try { localStorage.setItem("nonmaris_dest", JSON.stringify({ lat, lon })); } catch(e) {} }
+function loadDestination() { try { const v = JSON.parse(localStorage.getItem("nonmaris_dest")); if (v && Number.isFinite(v.lat)) { destLat = v.lat; destLon = v.lon; return v; } } catch(e) {} return null; }
+function updateDestinationReadout() { if ($("destReadout")) $("destReadout").textContent = destLat === null ? "—" : `${destLat.toFixed(7)}, ${destLon.toFixed(7)}`; }
+function publishDestinationMessage(lat, lon, updateUI = true) {
+  if (!mqttClient || !mqttClient.connected) return;
+  mqttClient.publish(DESTINATION_TOPIC, JSON.stringify({ latitude: lat, longitude: lon, timestamp: new Date().toISOString() }), { retain: true });
+}
 function publishDestination(lat, lon) {
-  if (
-    !Number.isFinite(lat) ||
-    !Number.isFinite(lon) ||
-    lat < -90 ||
-    lat > 90 ||
-    lon < -180 ||
-    lon > 180
-  ) {
-    alert(
-      "Invalid coordinates. Latitude must be –90…90 and longitude –180…180."
-    );
-    return;
-  }
-
-  destLat = lat;
-  destLon = lon;
-
-  if ($("destLat")) {
-    $("destLat").value = lat.toFixed(7);
-  }
-
-  if ($("destLon")) {
-    $("destLon").value = lon.toFixed(7);
-  }
-
-  drawDestinationMarker(lat, lon);
-  updateDestinationReadout();
-
-  saveDestination(lat, lon);
-
-  // Publish the selected destination to all connected dashboards.
-  publishDestinationMessage(lat, lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return alert("Invalid coordinates.");
+  destLat = lat; destLon = lon;
+  if ($("destLat")) $("destLat").value = lat.toFixed(7); if ($("destLon")) $("destLon").value = lon.toFixed(7);
+  drawDestinationMarker(lat, lon); updateDestinationReadout(); saveDestination(lat, lon); publishDestinationMessage(lat, lon); updateCompass();
 }
-
-function publishDestinationMessage(lat, lon) {
-  if (!mqttClient || !mqttClient.connected) {
-    if ($("sendState")) {
-      $("sendState").textContent =
-        "MQTT not connected — destination saved locally";
-    }
-
-    return;
-  }
-
-  const payload = JSON.stringify({
-    latitude: lat,
-    longitude: lon,
-    timestamp: Date.now()
-  });
-
-  mqttClient.publish(
-    DESTINATION_TOPIC,
-    payload,
-    { retain: true }
-  );
-
-  if ($("sendState")) {
-    $("sendState").textContent = "Destination published";
-  }
-}
-
-// Clear destination locally and tell other dashboards.
 function clearDestination() {
-  clearDestinationFromRemote();
-
-  if (mqttClient && mqttClient.connected) {
-    mqttClient.publish(
-      DESTINATION_TOPIC,
-      "",
-      { retain: true }
-    );
-  }
+  destLat = null; destLon = null; try { localStorage.removeItem("nonmaris_dest"); } catch(e) {}
+  if (destMarker) { map.removeLayer(destMarker); destMarker = null; }
+  if ($("destLat")) $("destLat").value = ""; if ($("destLon")) $("destLon").value = "";
+  updateDestinationReadout(); updateCompass();
+  if (mqttClient && mqttClient.connected) mqttClient.publish(DESTINATION_TOPIC, "", { retain: true }); // empty = cleared, ESP8266 forwards DEST,CLEAR
 }
 
-// Clear destination locally without publishing another message.
-function clearDestinationFromRemote() {
-  destLat = null;
-  destLon = null;
-
-  if (destMarker && map) {
-    map.removeLayer(destMarker);
-    destMarker = null;
-  }
-
-  if ($("destLat")) {
-    $("destLat").value = "";
-  }
-
-  if ($("destLon")) {
-    $("destLon").value = "";
-  }
-
-  updateDestinationReadout();
-  updateRouteLine();
-
-  localStorage.removeItem("robotDest");
+// ---------- Map / history ----------
+function initMap() {
+  map = L.map("map").setView([6.5244, 3.3792], 13);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "© OpenStreetMap" }).addTo(map);
+  map.on("click", (e) => publishDestination(e.latlng.lat, e.latlng.lng));
 }
-
+function updateMap(lat, lon, acc) {
+  if (!map) return;
+  if (!phoneMarker) { phoneMarker = L.marker([lat, lon]).addTo(map); map.setView([lat, lon], 16); }
+  else phoneMarker.setLatLng([lat, lon]);
+  if (accuracyCircle) map.removeLayer(accuracyCircle);
+  accuracyCircle = L.circle([lat, lon], { radius: acc || 10 }).addTo(map);
+  if ($("openMap")) $("openMap").href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}`;
+}
 function drawDestinationMarker(lat, lon) {
   if (!map) return;
-
-  const pos = [lat, lon];
-
-  if (!destMarker) {
-    destMarker = L.marker(pos, {
-      icon: L.divIcon({
-        className: "dest-icon",
-        html: "🎯",
-        iconSize: [24, 24]
-      })
-    })
-      .addTo(map)
-      .bindPopup("Destination waypoint");
-
-  } else {
-    destMarker.setLatLng(pos);
-  }
-
-  updateRouteLine();
+  if (!destMarker) destMarker = L.marker([lat, lon], { icon: L.divIcon({ className: "dest-icon", html: "🎯", iconSize: [24, 24] }) }).addTo(map);
+  else destMarker.setLatLng([lat, lon]);
 }
-
-function updateDestinationReadout() {
-  if (!$("destReadout")) return;
-
-  if (destLat === null || destLon === null) {
-    $("destReadout").textContent = "—";
-    return;
-  }
-
-  $("destReadout").textContent =
-    `${destLat.toFixed(7)}, ${destLon.toFixed(7)}`;
+function addHistory(lat, lon, acc, time) {
+  const tbody = $("history"); if (!tbody) return;
+  const empty = tbody.querySelector(".empty"); if (empty) empty.parentElement.remove();
+  const tr = document.createElement("tr"); tr.innerHTML = `<td>${time}</td><td>${lat.toFixed(7)}</td><td>${lon.toFixed(7)}</td><td>±${Number(acc).toFixed(1)} m</td>`;
+  tbody.prepend(tr); while (tbody.children.length > 10) tbody.removeChild(tbody.lastChild);
 }
-
-function saveDestination(lat, lon) {
-  try {
-    localStorage.setItem(
-      "robotDest",
-      JSON.stringify({
-        latitude: lat,
-        longitude: lon
-      })
-    );
-
-  } catch (e) {
-    console.warn("Could not save destination:", e);
-  }
-}
-
-function loadSavedDestination() {
-  try {
-    const raw = localStorage.getItem("robotDest");
-
-    if (!raw) return null;
-
-    const d = JSON.parse(raw);
-
-    if (
-      Number.isFinite(d.latitude) &&
-      Number.isFinite(d.longitude) &&
-      d.latitude >= -90 &&
-      d.latitude <= 90 &&
-      d.longitude >= -180 &&
-      d.longitude <= 180
-    ) {
-      return d;
-    }
-
-  } catch (e) {
-    // Ignore invalid saved data.
-  }
-
-  return null;
-}
-
-// ==========================================
-// UPDATE MAP
-// ==========================================
-
-function updateMap(lat, lon, accuracy) {
-  if (!map) return;
-
-  lastPhonePos = [lat, lon];
-
-  const position = lastPhonePos;
-
-  if (!marker) {
-    marker = L.marker(position)
-      .addTo(map)
-      .bindPopup("Phone GPS Location");
-
-    accuracyCircle = L.circle(position, {
-      radius: accuracy,
-      color: "#168fe5",
-      fillOpacity: 0.10
-    }).addTo(map);
-
-    map.setView(position, 16);
-
-  } else {
-    marker.setLatLng(position);
-    accuracyCircle.setLatLng(position);
-    accuracyCircle.setRadius(accuracy);
-  }
-
-  updateRouteLine();
-}
-
-// ==========================================
-// ROUTE LINE + DISTANCE
-// ==========================================
-
-function haversineMeters(a, b) {
-  const R = 6371000;
-
-  const toRad = (d) => (d * Math.PI) / 180;
-
-  const [lat1, lon1] = a;
-  const [lat2, lon2] = b;
-
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-
-  const s =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) *
-    Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) ** 2;
-
-  return 2 * R * Math.asin(Math.sqrt(s));
-}
-
-function formatDistance(m) {
-  if (!Number.isFinite(m)) return "—";
-
-  if (m >= 1000) {
-    return `${(m / 1000).toFixed(2)} km`;
-  }
-
-  return `${m.toFixed(0)} m`;
-}
-
-function updateRouteLine() {
-  if (!map) return;
-
-  const havePhone = Array.isArray(lastPhonePos);
-
-  const haveDest =
-    destLat !== null && destLon !== null;
-
-  if ($("distanceToDest")) {
-    if (havePhone && haveDest) {
-      const d = haversineMeters(
-        lastPhonePos,
-        [destLat, destLon]
-      );
-
-      $("distanceToDest").textContent = formatDistance(d);
-
-    } else {
-      $("distanceToDest").textContent = "—";
-    }
-  }
-
-  if (havePhone && haveDest) {
-    const points = [
-      lastPhonePos,
-      [destLat, destLon]
-    ];
-
-    if (!routeLine) {
-      routeLine = L.polyline(points, {
-        color: "#ff7070",
-        weight: 3,
-        opacity: 0.9,
-        dashArray: "8 6"
-      }).addTo(map);
-
-    } else {
-      routeLine.setLatLngs(points);
-    }
-
-  } else if (routeLine) {
-    map.removeLayer(routeLine);
-    routeLine = null;
-  }
-}
-
-// ==========================================
-// CAMERA CONTROLS
-// ==========================================
-
-function centerOnPhone() {
-  if (!map) return;
-
-  if (!Array.isArray(lastPhonePos)) {
-    alert("No phone position yet. Press Start GPS first.");
-    return;
-  }
-
-  map.flyTo(
-    lastPhonePos,
-    Math.max(map.getZoom(), 16),
-    { duration: 0.8 }
-  );
-}
-
-function centerOnDestination() {
-  if (!map) return;
-
-  if (destLat === null || destLon === null) {
-    alert(
-      "No destination set. Type coordinates or click the map first."
-    );
-    return;
-  }
-
-  map.flyTo(
-    [destLat, destLon],
-    Math.max(map.getZoom(), 16),
-    { duration: 0.8 }
-  );
-}
-
-// ==========================================
-// ADD GPS READING TO HISTORY
-// ==========================================
-
-function addHistory(lat, lon, accuracy, time) {
-  const history = $("history");
-
-  if (!history) return;
-
-  const empty = history.querySelector(".empty");
-
-  if (empty) {
-    history.removeChild(empty.parentElement);
-  }
-
-  const row = document.createElement("tr");
-
-  row.innerHTML =
-    `<td>${time}</td>
-     <td>${lat.toFixed(7)}</td>
-     <td>${lon.toFixed(7)}</td>
-     <td>±${accuracy.toFixed(1)} m</td>`;
-
-  history.prepend(row);
-
-  while (history.children.length > 10) {
-    history.removeChild(history.lastChild);
-  }
-}
-
-// ==========================================
-// HANDLE PHONE GPS POSITION
-// ==========================================
-
-function handlePosition(position) {
-  const lat = position.coords.latitude;
-  const lon = position.coords.longitude;
-  const accuracy = position.coords.accuracy;
-  const timestamp = Date.now();
-
-  lastGpsData = {
-    latitude: lat,
-    longitude: lon,
-    accuracy: accuracy,
-    heading: compassHeading,
-    headingAbsolute: compassIsAbsolute,
-    timestamp: timestamp
-  };
-
-  if ($("latitude")) {
-    $("latitude").textContent = lat.toFixed(7);
-  }
-
-  if ($("longitude")) {
-    $("longitude").textContent = lon.toFixed(7);
-  }
-
-  if ($("accuracy")) {
-    $("accuracy").textContent =
-      `±${accuracy.toFixed(1)} m`;
-  }
-
-  const timeText =
-    new Date(timestamp).toLocaleTimeString();
-
-  if ($("lastUpdate")) {
-    $("lastUpdate").textContent = timeText;
-  }
-
-  if ($("gpsStatus")) {
-    $("gpsStatus").textContent = "GPS location acquired";
-  }
-
-  updateMap(lat, lon, accuracy);
-
-  if ($("openMap")) {
-    $("openMap").href =
-      `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}`;
-  }
-
-  if (mqttClient && mqttClient.connected) {
-    publishLocationData(true);
-
-  } else {
-    if ($("sendState")) {
-      $("sendState").textContent =
-        "Waiting for MQTT connection";
-    }
-  }
-
-  addHistory(lat, lon, accuracy, timeText);
-}
-
-// ==========================================
-// GPS ERROR HANDLING
-// ==========================================
-
-function handleGPSError(error) {
-  let message = "Unable to obtain GPS location.";
-
-  switch (error.code) {
-    case error.PERMISSION_DENIED:
-      message =
-        "Location permission denied. Allow location access.";
-      break;
-
-    case error.POSITION_UNAVAILABLE:
-      message = "GPS location unavailable.";
-      break;
-
-    case error.TIMEOUT:
-      message = "GPS request timed out. Try again.";
-      break;
-  }
-
-  if ($("gpsStatus")) {
-    $("gpsStatus").textContent = message;
-  }
-
-  console.error(message);
-}
-
-// ==========================================
-// START GPS
-// ==========================================
-
-function startGPS() {
-  if (!navigator.geolocation) {
-    alert("Your browser does not support GPS location.");
-    return;
-  }
-
-  if (watchId !== null) return;
-
-  if ($("gpsStatus")) {
-    $("gpsStatus").textContent =
-      "Searching for GPS location...";
-  }
-
-  watchId = navigator.geolocation.watchPosition(
-    handlePosition,
-    handleGPSError,
-    {
-      enableHighAccuracy: true,
-      timeout: 20000,
-      maximumAge: 2000
-    }
-  );
-
-  if ($("startBtn")) {
-    $("startBtn").disabled = true;
-  }
-
-  if ($("stopBtn")) {
-    $("stopBtn").disabled = false;
-  }
-}
-
-// ==========================================
-// STOP GPS
-// ==========================================
-
-function stopGPS() {
-  if (watchId !== null) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-
-  if ($("gpsStatus")) {
-    $("gpsStatus").textContent =
-      "GPS tracking stopped";
-  }
-
-  if ($("sendState")) {
-    $("sendState").textContent =
-      "GPS transmission stopped";
-  }
-
-  if ($("startBtn")) {
-    $("startBtn").disabled = false;
-  }
-
-  if ($("stopBtn")) {
-    $("stopBtn").disabled = true;
-  }
-}
-
-// ==========================================
-// MANUAL DESTINATION ENTRY
-// ==========================================
-
-function submitTypedDestination() {
-  const lat = Number($("destLat").value);
-  const lon = Number($("destLon").value);
-
-  publishDestination(lat, lon);
-}
-
-// ==========================================
-// BUTTON EVENTS
-// ==========================================
-
 document.addEventListener("DOMContentLoaded", () => {
-
-  initializeMap();
-
-  createCompassPanel();
-
-  connectMQTT();
-
-  if ($("startBtn")) {
-    $("startBtn").addEventListener("click", startGPS);
-  }
-
-  if ($("stopBtn")) {
-    $("stopBtn").addEventListener("click", stopGPS);
-  }
-
-  if ($("setDestBtn")) {
-    $("setDestBtn").addEventListener(
-      "click",
-      submitTypedDestination
-    );
-  }
-
-  if ($("clearDestBtn")) {
-    $("clearDestBtn").addEventListener(
-      "click",
-      clearDestination
-    );
-  }
-
-  if ($("centerPhoneBtn")) {
-    $("centerPhoneBtn").addEventListener(
-      "click",
-      centerOnPhone
-    );
-  }
-
-  if ($("centerDestBtn")) {
-    $("centerDestBtn").addEventListener(
-      "click",
-      centerOnDestination
-    );
-  }
-
-  ["destLat", "destLon"].forEach(id => {
-    const el = $(id);
-
-    if (el) {
-      el.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          submitTypedDestination();
-        }
-      });
-    }
-  });
-
+  initMap(); connectMQTT(); const s = loadDestination(); if (s) { drawDestinationMarker(s.lat, s.lon); updateDestinationReadout(); }
+  $("startBtn")?.addEventListener("click", startGPS);
+  $("stopBtn")?.addEventListener("click", stopGPS);
+  $("compassBtn")?.addEventListener("click", enableCompass);
+  $("setDestBtn")?.addEventListener("click", () => publishDestination(parseFloat($("destLat").value), parseFloat($("destLon").value)));
+  $("clearDestBtn")?.addEventListener("click", clearDestination);
+  $("clearBtn")?.addEventListener("click", () => { if ($("history")) $("history").innerHTML = '<tr><td colspan="4" class="empty">No readings yet.</td></tr>'; });
+  $("centerPhoneBtn")?.addEventListener("click", () => { if (map && currentLat !== null) map.setView([currentLat, currentLon], 16); });
+  $("centerDestBtn")?.addEventListener("click", () => { if (map && destLat !== null) map.setView([destLat, destLon], 16); });
 });
