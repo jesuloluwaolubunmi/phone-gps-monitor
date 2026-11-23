@@ -9,7 +9,8 @@ const BASE = `phonegps/esp8266/${DEVICE_ID}`;
 const LOCATION_TOPIC = `${BASE}/location`;
 const DESTINATION_TOPIC = `${BASE}/destination`;
 const STATUS_TOPIC = `${BASE}/status`;
-const NAV_TOPIC = `${BASE}/nav`; // NEW: compass turn instruction
+const NAV_TOPIC = `${BASE}/nav`; // compass turn instruction (phone -> laptop + ESP8266)
+const START_TOPIC = `${BASE}/start`; // starting point (phone -> laptop), retained
 
 let mqttClient = null, watchId = null, map = null, phoneMarker = null, destMarker = null, accuracyCircle = null;
 let currentLat = null, currentLon = null, currentAccuracy = null;
@@ -19,6 +20,8 @@ let compassSource = "—"; // "Magnetometer" | "GPS heading (fallback)"
 let gpsHeading = null;
 let lastNavSentAt = 0, sentCount = 0;
 let compassListening = false;
+let startLat = null, startLon = null, routeLine = null, startMarker = null;
+let lastNavFromMQTT = null; // laptop mirrors this, never recomputes
 
 // ---------- helpers ----------
 const toRad = (d) => d * Math.PI / 180;
@@ -54,7 +57,7 @@ function connectMQTT() {
   mqttClient.on("connect", () => {
     if ($("mqttStatus")) $("mqttStatus").textContent = "Connected";
     if ($("brokerState")) $("brokerState").textContent = "Connected";
-    mqttClient.subscribe([LOCATION_TOPIC, DESTINATION_TOPIC, STATUS_TOPIC]);
+    mqttClient.subscribe([LOCATION_TOPIC, DESTINATION_TOPIC, STATUS_TOPIC, NAV_TOPIC, START_TOPIC]);
     const saved = loadDestination(); if (saved) publishDestinationMessage(saved.lat, saved.lon, false);
   });
   mqttClient.on("message", (topic, payload) => {
@@ -70,8 +73,26 @@ function connectMQTT() {
       } catch(e) {}
     }
     if (topic === DESTINATION_TOPIC) {
-      try { const d = JSON.parse(payload.toString());
-        if (Number.isFinite(Number(d.latitude))) { destLat = Number(d.latitude); destLon = Number(d.longitude); drawDestinationMarker(destLat, destLon); updateDestinationReadout(); updateCompass(); }
+      if (payload.toString().length === 0) { clearDestinationLocal(); return; }
+      try { const dd = JSON.parse(payload.toString());
+        if (Number.isFinite(Number(dd.latitude))) { destLat = Number(dd.latitude); destLon = Number(dd.longitude); drawDestinationMarker(destLat, destLon); updateDestinationReadout();
+          // If THIS device is the phone/robot and it just learned a destination set from the laptop,
+          // lock its current position as the Start and broadcast it.
+          if (watchId !== null && currentLat !== null && startLat === null) setStart(currentLat, currentLon, true);
+          updateRoute(); updateCompass(); }
+      } catch(e) {}
+    }
+    if (topic === START_TOPIC) {
+      if (payload.toString().length === 0) { clearStartLocal(); return; }
+      try { const s = JSON.parse(payload.toString());
+        if (Number.isFinite(Number(s.latitude))) { startLat = Number(s.latitude); startLon = Number(s.longitude); saveStart(startLat, startLon); drawStartMarker(); updateRoute(); }
+      } catch(e) {}
+    }
+    if (topic === NAV_TOPIC) {
+      // LAPTOP / VIEWER ONLY: mirror the phone's compass exactly. Phone ignores its own echo.
+      if (watchId !== null) return;
+      try { const n = JSON.parse(payload.toString());
+        if (Number.isFinite(Number(n.heading)) && Number.isFinite(Number(n.bearing))) { lastNavFromMQTT = n; renderCompass(n.heading, n.bearing, n.turn, n.distance, n.headingSource || "Phone magnetometer (via MQTT)"); }
       } catch(e) {}
     }
   });
@@ -114,40 +135,44 @@ function effectiveHeading() {
 }
 
 // ---------- Compass UI + NAV calculation + publish ----------
+// One renderer used by BOTH devices. Phone calls it with locally computed values,
+// laptop calls it with values received on NAV_TOPIC. Same numbers = same compass.
+function fmtDist(m){ return m < 1000 ? `${m.toFixed(1)} m` : `${(m/1000).toFixed(2)} km`; }
+function renderCompass(heading, bearing, turn, distance, source){
+  if ($("headingReadout")) $("headingReadout").textContent = `${heading.toFixed(1)}°`;
+  if ($("headingDir")) $("headingDir").textContent = cardinal(heading);
+  if ($("turnSource")) $("turnSource").textContent = `Source: ${source}`;
+  if ($("compassStatus")) $("compassStatus").textContent = `Compass: ${source} — ${heading.toFixed(1)}°`;
+  const needle = $("headingNeedle"); if (needle) needle.style.transform = `rotate(${heading}deg)`;
+  const aligned = Math.abs(turn) <= 5;
+  if ($("bearingReadout")) $("bearingReadout").textContent = `${bearing.toFixed(1)}°`;
+  if ($("bearingDir")) $("bearingDir").textContent = cardinal(bearing);
+  if ($("turnReadout")) $("turnReadout").textContent = aligned ? "0° — ALIGNED" : `${turn > 0 ? "+" : ""}${turn.toFixed(1)}°`;
+  if ($("turnDirection")) $("turnDirection").textContent = aligned ? "ALIGNED ✓" : (turn > 0 ? "TURN RIGHT →" : "← TURN LEFT");
+  const destNeedle = $("destNeedle"); if (destNeedle) destNeedle.style.transform = `rotate(${norm360(bearing)}deg)`; // North-up: red = absolute bearing
+  if ($("distanceToDest")) $("distanceToDest").textContent = fmtDist(distance);
+  if ($("distanceToDest2")) $("distanceToDest2").textContent = fmtDist(distance);
+  updateRouteDistances();
+}
 function updateCompass() {
+  // VIEWER (laptop): never compute locally - it has no magnetometer. Wait for NAV from phone.
+  if (watchId === null) {
+    if ($("turnSource")) $("turnSource").textContent = "Source: Phone magnetometer (via MQTT) — waiting for NAV…";
+    if (lastNavFromMQTT) renderCompass(lastNavFromMQTT.heading, lastNavFromMQTT.bearing, lastNavFromMQTT.turn, lastNavFromMQTT.distance, lastNavFromMQTT.headingSource || "Phone magnetometer (via MQTT)");
+    return;
+  }
+  // SENDER (phone on robot): compute locally, render, publish for laptop + Arduino.
   const h = effectiveHeading();
-  const headingEl = $("headingReadout"), bearingEl = $("bearingReadout"), turnEl = $("turnReadout");
-  if (headingEl) headingEl.textContent = h.heading === null ? "—" : `${h.heading.toFixed(1)}°`;
-  if ($("headingDir")) $("headingDir").textContent = h.heading === null ? "" : cardinal(h.heading);
-  if ($("turnSource")) $("turnSource").textContent = `Source: ${h.source}`;
-  if ($("compassStatus") && h.heading !== null) $("compassStatus").textContent = `Compass: ${h.source} — ${h.heading.toFixed(1)}°`;
-
-  // Rotate blue needle: needle points up at 0, so rotate by heading
-  const needle = $("headingNeedle");
-  if (needle && h.heading !== null) needle.style.transform = `rotate(${h.heading}deg)`;
-
-  if (currentLat === null || destLat === null || h.heading === null) {
-    if (bearingEl) bearingEl.textContent = "—";
-    if (turnEl) turnEl.textContent = "—";
+  if (h.heading === null || currentLat === null || destLat === null) {
+    if ($("headingReadout")) $("headingReadout").textContent = h.heading === null ? "—" : `${h.heading.toFixed(1)}°`;
     if ($("turnDirection")) $("turnDirection").textContent = "WAITING";
     return;
   }
   const bearing = bearingTo(currentLat, currentLon, destLat, destLon);
   const dist = haversineM(currentLat, currentLon, destLat, destLon);
-  const turn = norm180(bearing - h.heading); // + = RIGHT, - = LEFT
-  const aligned = Math.abs(turn) <= 5;
-  if (bearingEl) bearingEl.textContent = `${bearing.toFixed(1)}°`;
-  if ($("bearingDir")) $("bearingDir").textContent = cardinal(bearing);
-  if (turnEl) turnEl.textContent = aligned ? "0° — ALIGNED" : `${turn > 0 ? "+" : ""}${turn.toFixed(1)}°`;
-  if ($("turnDirection")) $("turnDirection").textContent = aligned ? "ALIGNED ✓" : (turn > 0 ? "TURN RIGHT →" : "← TURN LEFT");
-  // Red destination needle: relative to heading
-  const destNeedle = $("destNeedle");
-  if (destNeedle) destNeedle.style.transform = `rotate(${norm360(bearing - h.heading)}deg)`;
-  const dText = dist < 1000 ? `${dist.toFixed(1)} m` : `${(dist/1000).toFixed(2)} km`;
-  if ($("distanceToDest")) $("distanceToDest").textContent = dText;
-  if ($("distanceToDest2")) $("distanceToDest2").textContent = dText;
-
-  publishNav(bearing, h.heading, turn, dist, aligned, h.source);
+  const turn = norm180(bearing - h.heading);
+  renderCompass(h.heading, bearing, turn, dist, h.source);
+  publishNav(bearing, h.heading, turn, dist, Math.abs(turn) <= 5, h.source);
 }
 function publishNav(bearing, heading, turn, distance, aligned, source) {
   if (!mqttClient || !mqttClient.connected) return;
@@ -176,7 +201,7 @@ function updatePosition(lat, lon, acc) {
   if ($("accuracy")) $("accuracy").textContent = `±${Number(acc).toFixed(1)} m`;
   if ($("lastUpdate")) $("lastUpdate").textContent = new Date().toLocaleTimeString();
   if ($("gpsStatus")) $("gpsStatus").textContent = "Receiving GPS from phone";
-  updateMap(lat, lon, acc); addHistory(lat, lon, acc, new Date().toLocaleTimeString()); updateCompass();
+  updateMap(lat, lon, acc); addHistory(lat, lon, acc, new Date().toLocaleTimeString()); updateRouteDistances(); updateCompass();
 }
 function publishLocationData() {
   const h = effectiveHeading();
@@ -192,13 +217,52 @@ function startGPS() {
   if (watchId !== null) return;
   if ($("gpsStatus")) $("gpsStatus").textContent = "Searching for GPS location...";
   watchId = navigator.geolocation.watchPosition(handlePosition, handleGPSError, { enableHighAccuracy: true, timeout: 20000, maximumAge: 2000 });
-  if ($("startBtn")) $("startBtn").disabled = true; if ($("stopBtn")) $("stopBtn").disabled = false;
+  if ($("startBtn")) $("startBtn").disabled = true; if ($("stopBtn")) $("stopBtn").disabled = false; if ($("roleLabel")) $("roleLabel").textContent = "Sender (phone on robot)";
   enableCompass(); // start compass together with GPS
 }
 function stopGPS() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
   if ($("gpsStatus")) $("gpsStatus").textContent = "GPS tracking is stopped.";
   if ($("startBtn")) $("startBtn").disabled = false; if ($("stopBtn")) $("stopBtn").disabled = true;
+}
+
+
+// ---------- Starting point + route line ----------
+// Start = phone/robot position at the moment a destination is set (or Set Start pressed).
+// It is published retained on START_TOPIC so laptop + phone show the SAME line.
+function saveStart(lat, lon){ try{ localStorage.setItem("nonmaris_start", JSON.stringify({lat, lon})); }catch(e){} }
+function loadStart(){ try{ const v = JSON.parse(localStorage.getItem("nonmaris_start")); if(v && Number.isFinite(v.lat)){ startLat=v.lat; startLon=v.lon; return v; } }catch(e){} return null; }
+function setStart(lat, lon, publish=true){
+  startLat = lat; startLon = lon; saveStart(lat, lon); drawStartMarker(); updateRoute();
+  if (publish && mqttClient && mqttClient.connected) mqttClient.publish(START_TOPIC, JSON.stringify({latitude: lat, longitude: lon, timestamp: new Date().toISOString()}), {retain: true});
+}
+function clearStartLocal(){ startLat=null; startLon=null; try{ localStorage.removeItem("nonmaris_start"); }catch(e){} if(startMarker && map){ map.removeLayer(startMarker); startMarker=null; } if(routeLine && map){ map.removeLayer(routeLine); routeLine=null; } updateRouteDistances(); }
+function clearDestinationLocal(){ destLat=null; destLon=null; try{ localStorage.removeItem("nonmaris_dest"); }catch(e){} if(destMarker && map){ map.removeLayer(destMarker); destMarker=null; } if($("destLat")) $("destLat").value=""; if($("destLon")) $("destLon").value=""; updateDestinationReadout(); clearStartLocal(); updateCompass(); }
+function drawStartMarker(){
+  if(!map || startLat===null) return;
+  if(!startMarker) startMarker = L.marker([startLat, startLon], {icon: L.divIcon({className:"dest-icon", html:"🟢", iconSize:[24,24]})}).addTo(map).bindPopup("Start");
+  else startMarker.setLatLng([startLat, startLon]);
+}
+function updateRoute(){
+  if(!map) return;
+  if(routeLine){ map.removeLayer(routeLine); routeLine=null; }
+  if(startLat!==null && destLat!==null){
+    routeLine = L.polyline([[startLat, startLon],[destLat, destLon]], {color:"#2563eb", weight:4, dashArray:"10,6", opacity:0.9}).addTo(map);
+    routeLine.bindPopup("Planned route: Start → Destination");
+  }
+  updateRouteDistances();
+}
+function updateRouteDistances(){
+  const totalEl=$("routeTotal"), remEl=$("routeRemaining"), covEl=$("routeCovered"), progEl=$("routeProgress");
+  if(startLat===null || destLat===null){ if(totalEl) totalEl.textContent="—"; if(remEl) remEl.textContent="—"; if(covEl) covEl.textContent="—"; if(progEl) progEl.textContent="—"; return; }
+  const total = haversineM(startLat, startLon, destLat, destLon);
+  const remaining = (currentLat!==null) ? haversineM(currentLat, currentLon, destLat, destLon) : total;
+  const covered = (currentLat!==null) ? haversineM(startLat, startLon, currentLat, currentLon) : 0;
+  const progress = total > 0 ? Math.min(100, Math.max(0, (covered/total)*100)) : 0;
+  if(totalEl) totalEl.textContent = fmtDist(total);
+  if(remEl) remEl.textContent = fmtDist(remaining);
+  if(covEl) covEl.textContent = fmtDist(covered);
+  if(progEl) progEl.textContent = `${progress.toFixed(0)}%`;
 }
 
 // ---------- Destination ----------
@@ -213,14 +277,18 @@ function publishDestination(lat, lon) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return alert("Invalid coordinates.");
   destLat = lat; destLon = lon;
   if ($("destLat")) $("destLat").value = lat.toFixed(7); if ($("destLon")) $("destLon").value = lon.toFixed(7);
-  drawDestinationMarker(lat, lon); updateDestinationReadout(); saveDestination(lat, lon); publishDestinationMessage(lat, lon); updateCompass();
+  drawDestinationMarker(lat, lon); updateDestinationReadout(); saveDestination(lat, lon); publishDestinationMessage(lat, lon);
+  // Lock Start = robot's current position (only the phone knows it). Laptop setting a dest triggers this on the phone via MQTT handler.
+  if (watchId !== null && currentLat !== null) setStart(currentLat, currentLon, true);
+  updateRoute(); updateCompass();
 }
 function clearDestination() {
+  clearStartLocal();
   destLat = null; destLon = null; try { localStorage.removeItem("nonmaris_dest"); } catch(e) {}
   if (destMarker) { map.removeLayer(destMarker); destMarker = null; }
   if ($("destLat")) $("destLat").value = ""; if ($("destLon")) $("destLon").value = "";
   updateDestinationReadout(); updateCompass();
-  if (mqttClient && mqttClient.connected) mqttClient.publish(DESTINATION_TOPIC, "", { retain: true }); // empty = cleared, ESP8266 forwards DEST,CLEAR
+  if (mqttClient && mqttClient.connected) { mqttClient.publish(DESTINATION_TOPIC, "", { retain: true }); mqttClient.publish(START_TOPIC, "", { retain: true }); } // empty = cleared, ESP8266 forwards DEST,CLEAR
 }
 
 // ---------- Map / history ----------
@@ -249,12 +317,13 @@ function addHistory(lat, lon, acc, time) {
   tbody.prepend(tr); while (tbody.children.length > 10) tbody.removeChild(tbody.lastChild);
 }
 document.addEventListener("DOMContentLoaded", () => {
-  initMap(); connectMQTT(); const s = loadDestination(); if (s) { drawDestinationMarker(s.lat, s.lon); updateDestinationReadout(); }
+  initMap(); connectMQTT(); const s = loadDestination(); if (s) { drawDestinationMarker(s.lat, s.lon); updateDestinationReadout(); } const st = loadStart(); if (st) { drawStartMarker(); updateRoute(); }
   $("startBtn")?.addEventListener("click", startGPS);
   $("stopBtn")?.addEventListener("click", stopGPS);
   $("compassBtn")?.addEventListener("click", enableCompass);
   $("setDestBtn")?.addEventListener("click", () => publishDestination(parseFloat($("destLat").value), parseFloat($("destLon").value)));
   $("clearDestBtn")?.addEventListener("click", clearDestination);
+  $("setStartBtn")?.addEventListener("click", () => { if (watchId === null) return alert("Start is set by the phone on the robot — it knows its own position. Set the destination here, and the phone will lock Start automatically."); if (currentLat === null) return alert("No GPS yet on this phone."); setStart(currentLat, currentLon, true); });
   $("clearBtn")?.addEventListener("click", () => { if ($("history")) $("history").innerHTML = '<tr><td colspan="4" class="empty">No readings yet.</td></tr>'; });
   $("centerPhoneBtn")?.addEventListener("click", () => { if (map && currentLat !== null) map.setView([currentLat, currentLon], 16); });
   $("centerDestBtn")?.addEventListener("click", () => { if (map && destLat !== null) map.setView([destLat, destLon], 16); });
