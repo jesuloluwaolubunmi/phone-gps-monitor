@@ -31,7 +31,7 @@
   <main class="container">
     <header class="topbar">
       <div>
-        <p class="eyebrow">ESP8266 • MQTT • GPS • COMPASS</p>
+        <p class="eyebrow">ESP8266 • MQTT • GPS • COMPASS • WATER QUALITY</p>
         <h1>Phone GPS Monitor</h1>
         <p class="subtitle">Live phone location, miniature compass, and microcontroller connection</p>
       </div>
@@ -46,7 +46,6 @@
         <h2>GPS tracking</h2>
         <p id="gpsStatus" class="muted">GPS tracking is stopped.</p>
         <p id="compassStatus" class="muted">Compass: not started. Tap Enable Compass (iPhone needs permission).</p>
-        <p class="muted">Role: <strong id="roleLabel">Viewer (laptop)</strong> — phone on robot is Sender, laptop only mirrors it.</p>
       </div>
       <div class="button-row">
         <button id="startBtn" class="primary">Start GPS</button>
@@ -82,19 +81,21 @@
     </section>
 
 
-    <!-- ROUTE: START -> DESTINATION -->
+    <!-- WATER QUALITY -->
     <section class="panel">
-      <h2>Route: Start → Destination</h2>
-      <p class="muted">Start = robot position when destination was set. Blue dashed line on map = planned route. Green 🟢 = Start, 🎯 = Destination.</p>
+      <h2>💧 Water Quality <span class="pill" id="wqBand" style="background:#6b7280;color:#fff">WAITING</span></h2>
+      <p class="muted">Live from pH / turbidity / TDS sensors on the Arduino Uno. New reading every 5 seconds. Coloured dots on the map show where each reading was taken.</p>
       <div class="grid" style="margin-top:10px">
-        <article class="metric panel"><span class="metric-label">Start → Destination (total)</span><strong id="routeTotal">—</strong></article>
-        <article class="metric panel"><span class="metric-label">Remaining (robot → destination)</span><strong id="routeRemaining">—</strong></article>
-        <article class="metric panel"><span class="metric-label">Covered (start → robot)</span><strong id="routeCovered">—</strong></article>
-        <article class="metric panel"><span class="metric-label">Progress</span><strong id="routeProgress">—</strong></article>
+        <article class="metric panel"><span class="metric-label">pH</span><strong id="wqPH">—</strong><span class="muted">Good: 6.5 – 8.5</span></article>
+        <article class="metric panel"><span class="metric-label">Turbidity</span><strong id="wqTurb">—</strong><span class="muted">Clear: &lt; 50 NTU</span></article>
+        <article class="metric panel"><span class="metric-label">Total Dissolved Solids</span><strong id="wqTDS">—</strong><span class="muted">Fresh: &lt; 500 ppm</span></article>
+        <article class="metric panel"><span class="metric-label">Last water reading</span><strong id="wqTime">—</strong></article>
       </div>
-      <div class="button-row" style="margin-top:10px">
-        <button id="setStartBtn" class="secondary">📍 Set Start = Robot's Current Position</button>
-      </div>
+      <p class="muted" style="margin-top:8px">⚠️ Guide bands only — pH especially needs calibration with buffer solutions (see Arduino code) before you trust the numbers. Keep probes submerged and clean between tests.</p>
+      <div class="section-heading" style="margin-top:14px"><div><h3>Water quality history</h3><p class="muted">Most recent 20 readings, with robot position at time of reading.</p></div>
+      <button id="clearWQBtn" class="secondary small-button">Clear history</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Time</th><th>pH</th><th>Turbidity (NTU)</th><th>TDS (ppm)</th><th>Robot position</th><th>Quality</th></tr></thead>
+      <tbody id="wqHistory"><tr><td colspan="6" class="empty">No readings yet.</td></tr></tbody></table></div>
     </section>
 
     <section class="grid">
@@ -122,7 +123,7 @@
 
     <section class="panel map-panel">
       <div class="section-heading map-heading">
-        <div><h2>Phone location</h2><p class="muted">Blue marker = phone/robot. Green 🟢 = Start. Red 🎯 = Destination. Blue dashed line = Start → Destination route.</p></div>
+        <div><h2>Phone location</h2><p class="muted">Blue marker = phone. Red marker = destination.</p></div>
         <div class="map-actions">
           <button id="centerPhoneBtn" class="secondary small-button">📍 Center on Phone</button>
           <button id="centerDestBtn" class="secondary small-button">🎯 Center on Destination</button>
@@ -155,6 +156,6 @@
   </main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-  <script src="script.js?v=7"></script>
+  <script src="script.js?v=8"></script>
 </body>
 </html>
