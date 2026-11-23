@@ -46,6 +46,7 @@
         <h2>GPS tracking</h2>
         <p id="gpsStatus" class="muted">GPS tracking is stopped.</p>
         <p id="compassStatus" class="muted">Compass: not started. Tap Enable Compass (iPhone needs permission).</p>
+        <p class="muted">Role: <strong id="roleLabel">Viewer (laptop)</strong> — phone on robot is Sender, laptop only mirrors it.</p>
       </div>
       <div class="button-row">
         <button id="startBtn" class="primary">Start GPS</button>
@@ -80,6 +81,22 @@
       </div>
     </section>
 
+
+    <!-- ROUTE: START -> DESTINATION -->
+    <section class="panel">
+      <h2>Route: Start → Destination</h2>
+      <p class="muted">Start = robot position when destination was set. Blue dashed line on map = planned route. Green 🟢 = Start, 🎯 = Destination.</p>
+      <div class="grid" style="margin-top:10px">
+        <article class="metric panel"><span class="metric-label">Start → Destination (total)</span><strong id="routeTotal">—</strong></article>
+        <article class="metric panel"><span class="metric-label">Remaining (robot → destination)</span><strong id="routeRemaining">—</strong></article>
+        <article class="metric panel"><span class="metric-label">Covered (start → robot)</span><strong id="routeCovered">—</strong></article>
+        <article class="metric panel"><span class="metric-label">Progress</span><strong id="routeProgress">—</strong></article>
+      </div>
+      <div class="button-row" style="margin-top:10px">
+        <button id="setStartBtn" class="secondary">📍 Set Start = Robot's Current Position</button>
+      </div>
+    </section>
+
     <section class="grid">
       <article class="metric panel"><span class="metric-label">Latitude</span><strong id="latitude">—</strong></article>
       <article class="metric panel"><span class="metric-label">Longitude</span><strong id="longitude">—</strong></article>
@@ -105,7 +122,7 @@
 
     <section class="panel map-panel">
       <div class="section-heading map-heading">
-        <div><h2>Phone location</h2><p class="muted">Blue marker = phone. Red marker = destination.</p></div>
+        <div><h2>Phone location</h2><p class="muted">Blue marker = phone/robot. Green 🟢 = Start. Red 🎯 = Destination. Blue dashed line = Start → Destination route.</p></div>
         <div class="map-actions">
           <button id="centerPhoneBtn" class="secondary small-button">📍 Center on Phone</button>
           <button id="centerDestBtn" class="secondary small-button">🎯 Center on Destination</button>
@@ -138,6 +155,6 @@
   </main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-  <script src="script.js?v=6"></script>
+  <script src="script.js?v=7"></script>
 </body>
 </html>
