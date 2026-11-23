@@ -4,20 +4,36 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#101827">
-  <title>Phone GPS Monitor</title>
+  <title>Phone GPS Monitor - NONMARIS Compass</title>
   <link rel="stylesheet" href="style.css">
-  <link rel="stylesheet"
-        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-        crossorigin="">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <style>
+    .compass-panel{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+    .compass-wrap{position:relative;width:180px;height:180px;flex:0 0 auto}
+    .compass-dial{width:180px;height:180px;border-radius:50%;border:3px solid #1f2937;background:radial-gradient(circle at 50% 40%,#ffffff,#e5e7eb);position:relative;box-shadow:0 6px 18px rgba(0,0,0,.18);overflow:hidden}
+    .compass-dial .tick{position:absolute;left:50%;top:4px;width:2px;height:12px;background:#374151;transform-origin:50% 86px}
+    .compass-dial .cardinal{position:absolute;left:50%;top:50%;font-weight:800;font-size:15px;transform:translate(-50%,-50%)}
+    .compass-dial .cardinal.n{top:16px;color:#dc2626}.compass-dial .cardinal.s{top:148px}
+    .compass-dial .cardinal.e{left:156px;top:90px}.compass-dial .cardinal.w{left:24px;top:90px}
+    #headingNeedle,#destNeedle{position:absolute;left:50%;top:50%;transform-origin:50% 100%;pointer-events:none}
+    #headingNeedle{width:0;height:0;border-left:9px solid transparent;border-right:9px solid transparent;border-bottom:72px solid #2563eb;margin-left:-9px;margin-top:-72px}
+    #destNeedle{width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-bottom:58px solid #dc2626;margin-left:-6px;margin-top:-58px;opacity:.95}
+    .compass-center{position:absolute;left:50%;top:50%;width:22px;height:22px;border-radius:50%;background:#111827;transform:translate(-50%,-50%);z-index:3;border:2px solid #fff}
+    .compass-readouts{flex:1;min-width:220px}
+    .compass-readouts .big{font-size:1.6rem;font-weight:800}
+    .pill{display:inline-block;padding:4px 10px;border-radius:999px;background:#eef2ff;font-weight:700}
+    .muted{color:#6b7280}
+    .compass-legend{font-size:.85rem;color:#4b5563}
+  </style>
 </head>
 <body>
   <main class="container">
     <header class="topbar">
       <div>
-        <p class="eyebrow">ESP8266 • MQTT • GPS</p>
+        <p class="eyebrow">ESP8266 • MQTT • GPS • COMPASS</p>
         <h1>Phone GPS Monitor</h1>
-        <p class="subtitle">Live phone location and microcontroller connection</p>
+        <p class="subtitle">Live phone location, miniature compass, and microcontroller connection</p>
       </div>
       <div class="status-wrap">
         <span class="dot" id="mqttDot"></span>
@@ -29,61 +45,57 @@
       <div>
         <h2>GPS tracking</h2>
         <p id="gpsStatus" class="muted">GPS tracking is stopped.</p>
+        <p id="compassStatus" class="muted">Compass: not started. Tap Enable Compass (iPhone needs permission).</p>
       </div>
       <div class="button-row">
         <button id="startBtn" class="primary">Start GPS</button>
         <button id="stopBtn" class="secondary" disabled>Stop GPS</button>
+        <button id="compassBtn" class="secondary">Enable Compass</button>
+      </div>
+    </section>
+
+    <!-- MINIATURE COMPASS -->
+    <section class="panel">
+      <h2>Miniature Compass</h2>
+      <p class="muted">Blue needle = where you / the boat is facing (phone magnetometer). Red needle = direction to destination. Turn value is sent to Arduino via ESP8266.</p>
+      <div class="compass-panel">
+        <div class="compass-wrap">
+          <div class="compass-dial" id="compassDial">
+            <span class="cardinal n">N</span><span class="cardinal e">E</span>
+            <span class="cardinal s">S</span><span class="cardinal w">W</span>
+            <div id="destNeedle" title="Destination"></div>
+            <div id="headingNeedle" title="Heading"></div>
+            <div class="compass-center"></div>
+          </div>
+        </div>
+        <div class="compass-readouts">
+          <div>Heading <span class="big" id="headingReadout">—</span> <span id="headingDir"></span></div>
+          <div>Bearing to destination <span class="big" id="bearingReadout">—</span> <span id="bearingDir"></span></div>
+          <div>Turn needed <span class="big" id="turnReadout">—</span></div>
+          <div><span class="pill" id="turnDirection">WAITING</span> &nbsp; <span id="turnSource" class="muted">Source: —</span></div>
+          <div class="muted">Distance to destination: <strong id="distanceToDest">—</strong></div>
+          <div class="compass-legend">Positive turn = TURN RIGHT &nbsp;|&nbsp; Negative turn = TURN LEFT &nbsp;|&nbsp; |turn| ≤ 5° = ALIGNED</div>
+          <div class="muted">Last NAV sent: <span id="navLastSent">—</span></div>
+        </div>
       </div>
     </section>
 
     <section class="grid">
-      <article class="metric panel">
-        <span class="metric-label">Latitude</span>
-        <strong id="latitude">—</strong>
-      </article>
-      <article class="metric panel">
-        <span class="metric-label">Longitude</span>
-        <strong id="longitude">—</strong>
-      </article>
-      <article class="metric panel">
-        <span class="metric-label">Accuracy</span>
-        <strong id="accuracy">—</strong>
-      </article>
-      <article class="metric panel">
-        <span class="metric-label">Last GPS update</span>
-        <strong id="lastUpdate">—</strong>
-      </article>
-      <!-- NEW: live distance to destination -->
-      <article class="metric panel">
-        <span class="metric-label">Distance to destination</span>
-        <strong id="distanceToDest">—</strong>
-      </article>
+      <article class="metric panel"><span class="metric-label">Latitude</span><strong id="latitude">—</strong></article>
+      <article class="metric panel"><span class="metric-label">Longitude</span><strong id="longitude">—</strong></article>
+      <article class="metric panel"><span class="metric-label">Accuracy</span><strong id="accuracy">—</strong></article>
+      <article class="metric panel"><span class="metric-label">Last GPS update</span><strong id="lastUpdate">—</strong></article>
+      <article class="metric panel"><span class="metric-label">Distance to destination</span><strong id="distanceToDest2">—</strong></article>
     </section>
 
-    <!-- destination / waypoint section -->
     <section class="panel waypoint-panel">
       <div class="section-heading">
-        <div>
-          <h2>Destination waypoint</h2>
-          <p class="muted">Type coordinates or click the map to choose a target.</p>
-        </div>
-        <div class="waypoint-state">
-          <span class="metric-label">Current destination</span>
-          <strong id="destReadout">—</strong>
-        </div>
+        <div><h2>Destination waypoint</h2><p class="muted">Type coordinates or click the map to choose a target.</p></div>
+        <div class="waypoint-state"><span class="metric-label">Current destination</span><strong id="destReadout">—</strong></div>
       </div>
-
       <div class="waypoint-form">
-        <label>
-          <span>Latitude</span>
-          <input id="destLat" type="number" step="0.0000001"
-                 min="-90" max="90" placeholder="e.g. 6.5244">
-        </label>
-        <label>
-          <span>Longitude</span>
-          <input id="destLon" type="number" step="0.0000001"
-                 min="-180" max="180" placeholder="e.g. 3.3792">
-        </label>
+        <label><span>Latitude</span><input id="destLat" type="number" step="0.0000001" min="-90" max="90" placeholder="e.g. 6.5244"></label>
+        <label><span>Longitude</span><input id="destLon" type="number" step="0.0000001" min="-180" max="180" placeholder="e.g. 3.3792"></label>
         <div class="button-row">
           <button id="setDestBtn" class="primary">Set Destination</button>
           <button id="clearDestBtn" class="secondary">Clear</button>
@@ -92,60 +104,39 @@
     </section>
 
     <section class="panel map-panel">
-      <!-- NEW: camera buttons in the map header -->
       <div class="section-heading map-heading">
-        <div>
-          <h2>Phone location</h2>
-          <p class="muted">Blue marker = phone. Red marker = destination.</p>
-        </div>
+        <div><h2>Phone location</h2><p class="muted">Blue marker = phone. Red marker = destination.</p></div>
         <div class="map-actions">
           <button id="centerPhoneBtn" class="secondary small-button">📍 Center on Phone</button>
-          <button id="centerDestBtn"  class="secondary small-button">🎯 Center on Destination</button>
+          <button id="centerDestBtn" class="secondary small-button">🎯 Center on Destination</button>
           <a id="openMap" href="#" target="_blank" rel="noopener">Open in Maps ↗</a>
         </div>
       </div>
-      <div id="map" role="application" aria-label="Map showing phone GPS position"></div>
+      <div id="map" role="application" aria-label="Map showing phone GPS position" style="height:380px"></div>
     </section>
 
     <section class="grid lower-grid">
-      <article class="panel">
-        <h2>ESP8266 status</h2>
+      <article class="panel"><h2>ESP8266 status</h2>
         <div class="status-line"><span>MQTT broker</span><strong id="brokerState">Connecting</strong></div>
         <div class="status-line"><span>ESP8266</span><strong id="deviceState">Waiting for device</strong></div>
         <div class="status-line"><span>Last device message</span><strong id="deviceUpdate">—</strong></div>
       </article>
-      <article class="panel">
-        <h2>Transmission</h2>
+      <article class="panel"><h2>Transmission</h2>
         <div class="status-line"><span>Messages sent</span><strong id="sentCount">0</strong></div>
         <div class="status-line"><span>Last transmission</span><strong id="sendState">—</strong></div>
-        <p class="small muted">Coordinates are sent whenever the phone reports a new GPS position.</p>
+        <p class="small muted">Coordinates + NAV (turn) are sent whenever GPS / heading / destination changes.</p>
       </article>
     </section>
 
     <section class="panel">
-      <div class="section-heading">
-        <div>
-          <h2>Recent GPS readings</h2>
-          <p class="muted">Most recent 10 readings received by this webpage.</p>
-        </div>
-        <button id="clearBtn" class="secondary small-button">Clear history</button>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Time</th><th>Latitude</th><th>Longitude</th><th>Accuracy</th></tr></thead>
-          <tbody id="history"><tr><td colspan="4" class="empty">No readings yet.</td></tr></tbody>
-        </table>
-      </div>
+      <div class="section-heading"><div><h2>Recent GPS readings</h2><p class="muted">Most recent 10 readings received by this webpage.</p></div>
+      <button id="clearBtn" class="secondary small-button">Clear history</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Time</th><th>Latitude</th><th>Longitude</th><th>Accuracy</th></tr></thead>
+      <tbody id="history"><tr><td colspan="4" class="empty">No readings yet.</td></tr></tbody></table></div>
     </section>
-
-    <footer>
-      <p>Prototype dashboard. Location data is sensitive: use a private test network and do not share your MQTT topic.</p>
-    </footer>
+    <footer><p>Prototype dashboard. Location data is sensitive: use a private test network and do not share your MQTT topic.</p></footer>
   </main>
-
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-          crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
   <script src="script.js?v=6"></script>
 </body>
